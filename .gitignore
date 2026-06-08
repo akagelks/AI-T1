@@ -1,0 +1,12 @@
+# Ambientes virtuais
+venv/
+env/
+.env
+
+# Arquivos de cache do Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Arquivos do Mac (muito importante para seu Air 2017)
+.DS_Store
