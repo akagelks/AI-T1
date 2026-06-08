@@ -1,0 +1,4 @@
+def rodar_simulacao(df, estrategia_params, capital_inicial):
+    # Lógica complexa de entrada, saída, taxas e DCA
+    # Retorna uma lista de trades e o capital final
+    pass
