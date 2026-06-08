@@ -54,14 +54,37 @@ ESTRATEGIAS = {
 # ==========================================
 # MOTOR DE DADOS (CCXT - Binance)
 # ==========================================
+# ==========================================
+# MOTOR DE DADOS (CCXT - Binance) - VERSÃO CORRIGIDA
+# ==========================================
 @st.cache_data(ttl=60)
 def buscar_dados(symbol, timeframe, limit=500):
-    exchange = ccxt.binance()
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
-    df['time'] = pd.to_datetime(df['time'], unit='ms')
-    df.set_index('time', inplace=True)
-    return df
+    try:
+        # Configuração para evitar bloqueios da Binance
+        exchange = ccxt.binance({
+            'enableRateLimit': True, # Respeita o limite de requisições
+            'headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+        })
+        
+        # Tenta buscar os dados
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        
+        if not ohlcv:
+            st.error("Nenhum dado recebido da API. Tente novamente em alguns segundos.")
+            return pd.DataFrame()
+
+        df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+        df['time'] = pd.to_datetime(df['time'], unit='ms')
+        df.set_index('time', inplace=True)
+        return df
+        
+    except Exception as e:
+        st.error(f"Erro ao conectar na Binance: {str(e)}")
+        st.info("Dica: A Binance pode estar sobrecarregada. Aguarde 1 minuto e clique em 'Rerun'.")
+        # Retorna um dataframe vazio para não quebrar o app
+        return pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
 
 # ==========================================
 # MOTOR DE BACKTEST (Simula a estratégia)
