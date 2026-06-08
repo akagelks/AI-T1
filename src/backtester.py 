@@ -1,4 +1,120 @@
-def rodar_simulacao(df, estrategia_params, capital_inicial):
-    # Lógica complexa de entrada, saída, taxas e DCA
-    # Retorna uma lista de trades e o capital final
-    pass
+import streamlit as st
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import numpy as np
+
+# IMPORTANDO AS PEÇAS SEPARADAS
+from src.data_fetcher import buscar_dados
+from src.strategies import ESTRATEGIAS
+from src.backtester import rodar_backtest
+
+st.set_page_config(page_title="Quant Copy Panel", layout="wide", page_icon="📊")
+
+# SIDEBAR
+st.sidebar.title("⚙️ Controles")
+symbol = st.sidebar.selectbox("Ativo", ["BTC/USDT", "ETH/USDT", "SOL/USDT"], index=0)
+timeframe = st.sidebar.selectbox("Timeframe", ["5m", "15m", "1h"], index=0)
+capital_simulado = st.sidebar.number_input("Capital para Simulação (USDT)", min_value=10.0, value=100.0, step=10.0)
+
+# BUSCA DADOS
+with st.spinner("Buscando dados reais da Bybit..."):
+    df = buscar_dados(symbol, timeframe)
+
+if df.empty:
+    st.stop()
+
+# LAYOUT PRINCIPAL
+tab1, tab2, tab3 = st.tabs(["📊 Mercado Atual", "📈 Simulador / Backtest", "🤖 Bot Live (Copy Trade)"])
+
+# ABA 1: MERCADO
+with tab1:
+    st.header(f"📊 {symbol} - Visão em Tempo Real")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Preço Atual", f"${df['close'].iloc[-1]:,.2f}")
+    variacao_24h = ((df['close'].iloc[-1] - df['close'].iloc[-24]) / df['close'].iloc[-24] * 100) if len(df) >= 24 else 0
+    col2.metric("Variação 24h", f"{variacao_24h:.2f}%", delta=f"{variacao_24h:.2f}%")
+    col3.metric("Volume (última vela)", f"{df['volume'].iloc[-1]:,.0f}")
+    col4.metric("Média Volume (20)", f"{df['volume'].tail(20).mean():,.0f}")
+    
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
+    fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='Preço'), row=1, col=1)
+    fig.add_trace(go.Bar(x=df.index, y=df['volume'], name='Volume', marker_color=np.where(df['close'] > df['open'], 'green', 'red')), row=2, col=1)
+    fig.update_layout(height=600, xaxis_rangeslider_visible=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+# ABA 2: SIMULADOR
+with tab2:
+    st.header("📈 Simulador de Estratégias (Backtest)")
+    st.markdown(f"**Capital inicial:** US$ {capital_simulado:,.2f} | **Período:** Últimos {len(df)} candles ({timeframe})")
+    
+    estrategia_selecionada = st.selectbox("Escolha a estratégia:", options=list(ESTRATEGIAS.keys()), format_func=lambda x: f"{ESTRATEGIAS[x]['icone']} {x}")
+    st.markdown(f"**Como funciona:** {ESTRATEGIAS[estrategia_selecionada]['descricao']}")
+    
+    if st.button("🚀 Rodar Simulação Agora", type="primary"):
+        with st.spinner("Processando backtest..."):
+            trades, capital_final = rodar_backtest(df, estrategia_selecionada, capital_simulado)
+        
+        if not trades:
+            st.warning("⚠️ Nenhum trade gerado. Tente outro timeframe.")
+        else:
+            df_trades = pd.DataFrame(trades)
+            wins = len(df_trades[df_trades['resultado'] == 'WIN'])
+            losses = len(df_trades[df_trades['resultado'] == 'LOSS'])
+            win_rate = (wins / len(df_trades)) * 100
+            lucro_total = capital_final - capital_simulado
+            roi = (lucro_total / capital_simulado) * 100
+            
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Trades Totais", len(df_trades))
+            c2.metric("Win Rate", f"{win_rate:.1f}%", delta=f"{wins}W / {losses}L")
+            c3.metric("Lucro Líquido", f"US$ {lucro_total:,.2f}", delta=f"{roi:.2f}%")
+            c4.metric("Capital Final", f"US$ {capital_final:,.2f}")
+            
+            fig_cap = go.Figure()
+            fig_cap.add_trace(go.Scatter(x=df_trades['saida_time'], y=df_trades['capital_final'], mode='lines+markers', name='Curva de Capital', line=dict(color='gold', width=3)))
+            fig_cap.add_hline(y=capital_simulado, line_dash="dash", line_color="gray")
+            fig_cap.update_layout(title="Evolução do Capital", height=400)
+            st.plotly_chart(fig_cap, use_container_width=True)
+            
+            st.subheader("📋 Histórico de Trades")
+            display_df = df_trades[['entrada_time', 'entrada_preco', 'saida_time', 'saida_preco', 'resultado', 'pnl']].copy()
+            display_df.columns = ['Entrada', 'Preço Ent.', 'Saída', 'Preço Saída', 'Resultado', 'P&L (USDT)']
+            display_df['P&L (USDT)'] = display_df['P&L (USDT)'].apply(lambda x: f"${x:,.2f}")
+            st.dataframe(display_df, use_container_width=True)
+
+# ABA 3: BOT LIVE
+with tab3:
+    st.header("🤖 Painel de Controle - Bot Live")
+    st.markdown("Selecione as estratégias e ative o bot para operar em tempo real.")
+    
+    estrategias_ativas = []
+    for nome, dados in ESTRATEGIAS.items():
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.markdown(f"**{dados['icone']} {nome}**")
+            st.caption(dados['descricao'])
+        with col2:
+            if st.toggle("Ativar", key=f"toggle_{nome}", value=dados['ativo']):
+                estrategias_ativas.append(nome)
+    
+    st.divider()
+    col1, col2 = st.columns(2)
+    with col1: st.metric("Estratégias Ativas", len(estrategias_ativas))
+    with col2: st.metric("Status", "⏸️ PAUSADO" if not st.session_state.get('bot_ativo', False) else "🟢 OPERANDO")
+    
+    if not st.session_state.get('bot_ativo', False):
+        if st.button("▶️ ATIVAR BOT EM TEMPO REAL", type="primary", use_container_width=True):
+            if estrategias_ativas:
+                st.session_state['bot_ativo'] = True
+                st.session_state['estrategias_ativas'] = estrategias_ativas
+                st.rerun()
+            else: st.error("Selecione pelo menos uma estratégia!")
+    else:
+        if st.button("⏸️ PAUSAR BOT", type="secondary", use_container_width=True):
+            st.session_state['bot_ativo'] = False
+            st.rerun()
+        
+        if st.session_state.get('bot_ativo', False):
+            st.success(f"✅ **Bot ATIVO!** Operando com: {', '.join(st.session_state.get('estrategias_ativas', []))}")
+            st.info("🔧 Para operar de verdade, configure API Keys e use um VPS.")
