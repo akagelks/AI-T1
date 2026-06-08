@@ -52,27 +52,20 @@ ESTRATEGIAS = {
 }
 
 # ==========================================
-# MOTOR DE DADOS (CCXT - Binance)
-# ==========================================
-# ==========================================
-# MOTOR DE DADOS (CCXT - Binance) - VERSÃO CORRIGIDA
+# MOTOR DE DADOS (CCXT - BYBIT)
 # ==========================================
 @st.cache_data(ttl=60)
 def buscar_dados(symbol, timeframe, limit=500):
     try:
-        # Configuração para evitar bloqueios da Binance
-        exchange = ccxt.binance({
-            'enableRateLimit': True, # Respeita o limite de requisições
-            'headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
+        # Usando Bybit para evitar bloqueios regionais da Binance no Streamlit Cloud
+        exchange = ccxt.bybit({
+            'enableRateLimit': True,
+            'options': {'defaultType': 'spot'} 
         })
         
-        # Tenta buscar os dados
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         
         if not ohlcv:
-            st.error("Nenhum dado recebido da API. Tente novamente em alguns segundos.")
             return pd.DataFrame()
 
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
@@ -81,9 +74,7 @@ def buscar_dados(symbol, timeframe, limit=500):
         return df
         
     except Exception as e:
-        st.error(f"Erro ao conectar na Binance: {str(e)}")
-        st.info("Dica: A Binance pode estar sobrecarregada. Aguarde 1 minuto e clique em 'Rerun'.")
-        # Retorna um dataframe vazio para não quebrar o app
+        st.error(f"Erro ao conectar na API: {str(e)}")
         return pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
 
 # ==========================================
@@ -100,7 +91,6 @@ def rodar_backtest(df, estrategia, capital_inicial):
         janela = df.iloc[i-params.get('lookback', params.get('lookback_high', 20)):i]
         candle_atual = df.iloc[i]
         
-        # Lógica de entrada baseada na estratégia
         sinal_compra = False
         
         if estrategia == "Buy-the-Dip Scalp":
@@ -112,7 +102,6 @@ def rodar_backtest(df, estrategia, capital_inicial):
             vol_media = janela['volume'].mean()
             vol_std = janela['volume'].std()
             z_score = (candle_atual['volume'] - vol_media) / vol_std if vol_std > 0 else 0
-            # Compra se volume explode E preço cai (absorção)
             if z_score > params['zscore_threshold'] and candle_atual['close'] < candle_atual['open']:
                 sinal_compra = True
                 
@@ -122,14 +111,13 @@ def rodar_backtest(df, estrategia, capital_inicial):
             if candle_atual['close'] > maxima and candle_atual['volume'] > vol_media * params['vol_multiplier']:
                 sinal_compra = True
         
-        # Execução do trade simulado
         if sinal_compra and not posicao_aberta:
             preco_entrada = candle_atual['close']
             tp = preco_entrada * (1 + params['tp_pct']/100)
             sl = preco_entrada * (1 - params['sl_pct']/100)
-            tamanho_posicao = capital * 0.95  # 95% do capital (reserva para taxas)
+            tamanho_posicao = capital * 0.95
             quantidade = tamanho_posicao / preco_entrada
-            taxa_entrada = tamanho_posicao * 0.001  # 0.1% taker fee
+            taxa_entrada = tamanho_posicao * 0.001
             
             posicao_aberta = True
             trade = {
@@ -142,7 +130,6 @@ def rodar_backtest(df, estrategia, capital_inicial):
                 'status': 'ABERTO'
             }
         
-        # Verifica TP ou SL se tem posição aberta
         if posicao_aberta:
             resultado = None
             preco_saida = None
@@ -172,10 +159,14 @@ def rodar_backtest(df, estrategia, capital_inicial):
     return trades, capital
 
 # ==========================================
-# BUSCA OS DADOS
+# BUSCA OS DADOS E VERIFICA ERROS
 # ==========================================
-with st.spinner("Buscando dados reais da Binance..."):
+with st.spinner("Buscando dados reais da Bybit..."):
     df = buscar_dados(symbol, timeframe)
+
+# TRAVA DE SEGURANÇA: Se não houver dados, para o app aqui para não dar erro de índice
+if df.empty:
+    st.stop()
 
 # ==========================================
 # LAYOUT PRINCIPAL - 3 ABAS
@@ -195,7 +186,6 @@ with tab1:
     col3.metric("Volume (última vela)", f"{df['volume'].iloc[-1]:,.0f}")
     col4.metric("Média Volume (20)", f"{df['volume'].tail(20).mean():,.0f}")
     
-    # Gráfico
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
                         vertical_spacing=0.03, row_heights=[0.7, 0.3])
     
@@ -220,7 +210,6 @@ with tab2:
     st.header("📈 Simulador de Estratégias (Backtest)")
     st.markdown(f"**Capital inicial:** US$ {capital_simulado:,.2f} | **Período:** Últimos {len(df)} candles ({timeframe})")
     
-    # Seletor de estratégia
     estrategia_selecionada = st.selectbox(
         "Escolha a estratégia para simular:",
         options=list(ESTRATEGIAS.keys()),
@@ -236,7 +225,6 @@ with tab2:
         if not trades:
             st.warning("⚠️ Nenhum trade foi gerado neste período. Tente outro timeframe ou estratégia.")
         else:
-            # Métricas principais
             df_trades = pd.DataFrame(trades)
             wins = len(df_trades[df_trades['resultado'] == 'WIN'])
             losses = len(df_trades[df_trades['resultado'] == 'LOSS'])
@@ -251,7 +239,6 @@ with tab2:
             col4.metric("Capital Final", f"US$ {capital_final:,.2f}")
             col5.metric("Maior Gain", f"US$ {df_trades['pnl'].max():,.2f}" if 'pnl' in df_trades else "N/A")
             
-            # Gráfico de curva de capital
             fig_capital = go.Figure()
             fig_capital.add_trace(go.Scatter(
                 x=df_trades['saida_time'],
@@ -270,14 +257,12 @@ with tab2:
             )
             st.plotly_chart(fig_capital, use_container_width=True)
             
-            # Tabela de trades
             st.subheader("📋 Histórico Detalhado de Trades")
             display_df = df_trades[['entrada_time', 'entrada_preco', 'saida_time', 'saida_preco', 'resultado', 'pnl']].copy()
             display_df.columns = ['Entrada', 'Preço Entrada', 'Saída', 'Preço Saída', 'Resultado', 'P&L (USDT)']
             display_df['P&L (USDT)'] = display_df['P&L (USDT)'].apply(lambda x: f"${x:,.2f}")
             st.dataframe(display_df, use_container_width=True)
             
-            # Aviso
             st.warning("⚠️ **Atenção:** Esta é uma simulação histórica. Resultados passados não garantem resultados futuros. Taxas de 0.1% (taker) foram descontadas.")
 
 # ==========================================
@@ -296,7 +281,6 @@ with tab3:
     
     st.divider()
     
-    # Lista de estratégias com toggles
     st.subheader("📋 Estratégias Disponíveis")
     
     estrategias_ativas = []
@@ -312,7 +296,6 @@ with tab3:
     
     st.divider()
     
-    # Status do bot
     st.subheader("🔴 Status do Bot")
     
     col1, col2 = st.columns(2)
@@ -321,7 +304,6 @@ with tab3:
     with col2:
         st.metric("Status", "⏸️ PAUSADO" if not st.session_state.get('bot_ativo', False) else "🟢 OPERANDO")
     
-    # Botão de ativar/desativar
     if not st.session_state.get('bot_ativo', False):
         if st.button("▶️ ATIVAR BOT EM TEMPO REAL", type="primary", use_container_width=True):
             if not estrategias_ativas:
@@ -335,12 +317,11 @@ with tab3:
             st.session_state['bot_ativo'] = False
             st.rerun()
     
-    # Aviso crítico
     if st.session_state.get('bot_ativo', False):
         st.success(f"✅ **Bot ATIVO!** Operando com: {', '.join(st.session_state.get('estrategias_ativas', []))}")
         st.info("""
         🔧 **Próximo passo técnico:** Para o bot operar de verdade, precisamos:
-        1. Configurar suas **API Keys** da Binance/Bitget (modo Trade-Only, SEM permissão de saque)
+        1. Configurar suas **API Keys** da Bybit/Binance (modo Trade-Only, SEM permissão de saque)
         2. Rodar este código em um **VPS 24/7** (Streamlit Cloud adormece quando você fecha a aba)
         3. Me avise quando quiser configurar isso - te guio passo a passo.
         """)
