@@ -1,3 +1,9 @@
+import sys
+import os
+# Força o Python a olhar na mesma pasta do app.py para achar a pasta 'src'
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+
+
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
