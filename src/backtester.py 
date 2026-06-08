@@ -1,120 +1,155 @@
-import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import numpy as np
 
-# IMPORTANDO AS PEÇAS SEPARADAS
-from src.data_fetcher import buscar_dados
-from src.strategies import ESTRATEGIAS
-from src.backtester import rodar_backtest
-
-st.set_page_config(page_title="Quant Copy Panel", layout="wide", page_icon="📊")
-
-# SIDEBAR
-st.sidebar.title("⚙️ Controles")
-symbol = st.sidebar.selectbox("Ativo", ["BTC/USDT", "ETH/USDT", "SOL/USDT"], index=0)
-timeframe = st.sidebar.selectbox("Timeframe", ["5m", "15m", "1h"], index=0)
-capital_simulado = st.sidebar.number_input("Capital para Simulação (USDT)", min_value=10.0, value=100.0, step=10.0)
-
-# BUSCA DADOS
-with st.spinner("Buscando dados reais da Bybit..."):
-    df = buscar_dados(symbol, timeframe)
-
-if df.empty:
-    st.stop()
-
-# LAYOUT PRINCIPAL
-tab1, tab2, tab3 = st.tabs(["📊 Mercado Atual", "📈 Simulador / Backtest", "🤖 Bot Live (Copy Trade)"])
-
-# ABA 1: MERCADO
-with tab1:
-    st.header(f"📊 {symbol} - Visão em Tempo Real")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Preço Atual", f"${df['close'].iloc[-1]:,.2f}")
-    variacao_24h = ((df['close'].iloc[-1] - df['close'].iloc[-24]) / df['close'].iloc[-24] * 100) if len(df) >= 24 else 0
-    col2.metric("Variação 24h", f"{variacao_24h:.2f}%", delta=f"{variacao_24h:.2f}%")
-    col3.metric("Volume (última vela)", f"{df['volume'].iloc[-1]:,.0f}")
-    col4.metric("Média Volume (20)", f"{df['volume'].tail(20).mean():,.0f}")
+def rodar_backtest(
+    df: pd.DataFrame, 
+    nome_estrategia: str, 
+    capital_inicial: float,
+    filtro_regime: bool = True
+) -> dict:
+    """
+    Motor de backtest institucional.
+    Retorna: trades (lista), equity_curve (Series), metricas (dict)
+    """
+    from src.strategies import ESTRATEGIAS, gerar_sinais
     
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
-    fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='Preço'), row=1, col=1)
-    fig.add_trace(go.Bar(x=df.index, y=df['volume'], name='Volume', marker_color=np.where(df['close'] > df['open'], 'green', 'red')), row=2, col=1)
-    fig.update_layout(height=600, xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, use_container_width=True)
-
-# ABA 2: SIMULADOR
-with tab2:
-    st.header("📈 Simulador de Estratégias (Backtest)")
-    st.markdown(f"**Capital inicial:** US$ {capital_simulado:,.2f} | **Período:** Últimos {len(df)} candles ({timeframe})")
+    params = ESTRATEGIAS[nome_estrategia]
+    sinais = gerar_sinais(df, nome_estrategia)
     
-    estrategia_selecionada = st.selectbox("Escolha a estratégia:", options=list(ESTRATEGIAS.keys()), format_func=lambda x: f"{ESTRATEGIAS[x]['icone']} {x}")
-    st.markdown(f"**Como funciona:** {ESTRATEGIAS[estrategia_selecionada]['descricao']}")
-    
-    if st.button("🚀 Rodar Simulação Agora", type="primary"):
-        with st.spinner("Processando backtest..."):
-            trades, capital_final = rodar_backtest(df, estrategia_selecionada, capital_simulado)
-        
-        if not trades:
-            st.warning("⚠️ Nenhum trade gerado. Tente outro timeframe.")
+    # Aplica filtro de regime se disponível
+    if filtro_regime and 'acima_ema' in df.columns:
+        if params['tipo'] == 'LONG':
+            sinais = sinais & df['acima_ema']
         else:
-            df_trades = pd.DataFrame(trades)
-            wins = len(df_trades[df_trades['resultado'] == 'WIN'])
-            losses = len(df_trades[df_trades['resultado'] == 'LOSS'])
-            win_rate = (wins / len(df_trades)) * 100
-            lucro_total = capital_final - capital_simulado
-            roi = (lucro_total / capital_simulado) * 100
-            
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Trades Totais", len(df_trades))
-            c2.metric("Win Rate", f"{win_rate:.1f}%", delta=f"{wins}W / {losses}L")
-            c3.metric("Lucro Líquido", f"US$ {lucro_total:,.2f}", delta=f"{roi:.2f}%")
-            c4.metric("Capital Final", f"US$ {capital_final:,.2f}")
-            
-            fig_cap = go.Figure()
-            fig_cap.add_trace(go.Scatter(x=df_trades['saida_time'], y=df_trades['capital_final'], mode='lines+markers', name='Curva de Capital', line=dict(color='gold', width=3)))
-            fig_cap.add_hline(y=capital_simulado, line_dash="dash", line_color="gray")
-            fig_cap.update_layout(title="Evolução do Capital", height=400)
-            st.plotly_chart(fig_cap, use_container_width=True)
-            
-            st.subheader("📋 Histórico de Trades")
-            display_df = df_trades[['entrada_time', 'entrada_preco', 'saida_time', 'saida_preco', 'resultado', 'pnl']].copy()
-            display_df.columns = ['Entrada', 'Preço Ent.', 'Saída', 'Preço Saída', 'Resultado', 'P&L (USDT)']
-            display_df['P&L (USDT)'] = display_df['P&L (USDT)'].apply(lambda x: f"${x:,.2f}")
-            st.dataframe(display_df, use_container_width=True)
-
-# ABA 3: BOT LIVE
-with tab3:
-    st.header("🤖 Painel de Controle - Bot Live")
-    st.markdown("Selecione as estratégias e ative o bot para operar em tempo real.")
+            sinais = sinais & ~df['acima_ema']
     
-    estrategias_ativas = []
-    for nome, dados in ESTRATEGIAS.items():
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.markdown(f"**{dados['icone']} {nome}**")
-            st.caption(dados['descricao'])
-        with col2:
-            if st.toggle("Ativar", key=f"toggle_{nome}", value=dados['ativo']):
-                estrategias_ativas.append(nome)
+    trades = []
+    capital = capital_inicial
+    equity = []
+    posicao_aberta = False
+    cooldown = 0
     
-    st.divider()
-    col1, col2 = st.columns(2)
-    with col1: st.metric("Estratégias Ativas", len(estrategias_ativas))
-    with col2: st.metric("Status", "⏸️ PAUSADO" if not st.session_state.get('bot_ativo', False) else "🟢 OPERANDO")
-    
-    if not st.session_state.get('bot_ativo', False):
-        if st.button("▶️ ATIVAR BOT EM TEMPO REAL", type="primary", use_container_width=True):
-            if estrategias_ativas:
-                st.session_state['bot_ativo'] = True
-                st.session_state['estrategias_ativas'] = estrategias_ativas
-                st.rerun()
-            else: st.error("Selecione pelo menos uma estratégia!")
-    else:
-        if st.button("⏸️ PAUSAR BOT", type="secondary", use_container_width=True):
-            st.session_state['bot_ativo'] = False
-            st.rerun()
+    for i in range(50, len(df)):  # Começa após 50 candles para indicadores
+        candle = df.iloc[i]
+        timestamp = df.index[i]
         
-        if st.session_state.get('bot_ativo', False):
-            st.success(f"✅ **Bot ATIVO!** Operando com: {', '.join(st.session_state.get('estrategias_ativas', []))}")
-            st.info("🔧 Para operar de verdade, configure API Keys e use um VPS.")
+        # Cooldown: espera 3 candles após fechar trade
+        if cooldown > 0:
+            cooldown -= 1
+            equity.append(capital)
+            continue
+        
+        # Entrada
+        if sinais.iloc[i] and not posicao_aberta:
+            preco_entrada = candle['close']
+            if params['tipo'] == 'LONG':
+                tp = preco_entrada * (1 + params['tp_pct']/100)
+                sl = preco_entrada * (1 - params['sl_pct']/100)
+            else:  # SHORT
+                tp = preco_entrada * (1 - params['tp_pct']/100)
+                sl = preco_entrada * (1 + params['sl_pct']/100)
+            
+            tamanho = capital * 0.95
+            quantidade = tamanho / preco_entrada
+            taxa_entrada = tamanho * 0.001
+            
+            posicao_aberta = True
+            trade = {
+                'timestamp_entrada': timestamp,
+                'preco_entrada': preco_entrada,
+                'tp': tp,
+                'sl': sl,
+                'quantidade': quantidade,
+                'taxa_entrada': taxa_entrada,
+                'tipo': params['tipo'],
+                'estrategia': nome_estrategia
+            }
+        
+        # Saída
+        if posicao_aberta:
+            resultado = None
+            preco_saida = None
+            
+            if params['tipo'] == 'LONG':
+                if candle['high'] >= tp:
+                    resultado = 'WIN'
+                    preco_saida = tp
+                elif candle['low'] <= sl:
+                    resultado = 'LOSS'
+                    preco_saida = sl
+            else:  # SHORT
+                if candle['low'] <= tp:
+                    resultado = 'WIN'
+                    preco_saida = tp
+                elif candle['high'] >= sl:
+                    resultado = 'LOSS'
+                    preco_saida = sl
+            
+            if resultado:
+                valor_saida = trade['quantidade'] * preco_saida
+                taxa_saida = valor_saida * 0.001
+                
+                if params['tipo'] == 'LONG':
+                    pnl = (preco_saida - trade['preco_entrada']) * trade['quantidade']
+                else:
+                    pnl = (trade['preco_entrada'] - preco_saida) * trade['quantidade']
+                
+                pnl_liquido = pnl - trade['taxa_entrada'] - taxa_saida
+                capital += pnl_liquido
+                
+                trade.update({
+                    'timestamp_saida': timestamp,
+                    'preco_saida': preco_saida,
+                    'resultado': resultado,
+                    'pnl_liquido': pnl_liquido,
+                    'capital_final': capital
+                })
+                trades.append(trade)
+                posicao_aberta = False
+                cooldown = 3  # 3 candles de resfriamento
+        
+        equity.append(capital)
+    
+    # Calcula métricas institucionais
+    metricas = calcular_metricas(trades, capital_inicial, equity)
+    
+    return {
+        'trades': trades,
+        'equity': equity,
+        'metricas': metricas
+    }
+
+def calcular_metricas(trades: list, capital_inicial: float, equity: list) -> dict:
+    """Calcula métricas de risco no estilo institucional."""
+    if not trades:
+        return {
+            'roi_pct': 0, 'win_rate': 0, 'profit_factor': 0,
+            'max_drawdown_pct': 0, 'total_trades': 0, 'lucro_liquido': 0
+        }
+    
+    df_trades = pd.DataFrame(trades)
+    wins = df_trades[df_trades['resultado'] == 'WIN']['pnl_liquido'].sum()
+    losses = abs(df_trades[df_trades['resultado'] == 'LOSS']['pnl_liquido'].sum())
+    
+    # Profit Factor
+    profit_factor = wins / losses if losses > 0 else wins
+    
+    # Max Drawdown
+    equity_series = pd.Series([capital_inicial] + equity)
+    running_max = equity_series.cummax()
+    drawdown = (equity_series - running_max) / running_max
+    max_drawdown = drawdown.min() * 100
+    
+    # ROI
+    capital_final = equity[-1] if equity else capital_inicial
+    roi = ((capital_final - capital_inicial) / capital_inicial) * 100
+    
+    return {
+        'roi_pct': roi,
+        'win_rate': (len(df_trades[df_trades['resultado'] == 'WIN']) / len(df_trades)) * 100,
+        'profit_factor': profit_factor,
+        'max_drawdown_pct': max_drawdown,
+        'total_trades': len(df_trades),
+        'lucro_liquido': capital_final - capital_inicial,
+        'capital_final': capital_final
+    }
